@@ -62,7 +62,7 @@ format_exception({Class,Term,Trace}, Depth)
 	    io_lib:format("~w:~P\n~s",
 			  [Class, Term, Depth, format_stacktrace(Trace)]);
 	false ->
-	    format_term(Term, Depth)
+	    format_term({Class,Term,Trace}, Depth)
     end;
 format_exception(Term, Depth) ->
     format_term(Term, Depth).
