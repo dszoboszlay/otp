@@ -86,6 +86,9 @@ analyze_exit_term(Term) ->
 
 is_stacktrace([]) ->
     true;
+is_stacktrace([{M,F,AorAs,L}|Fs])
+  when is_atom(M), is_atom(F), is_integer(AorAs) orelse is_list(AorAs) ->
+    is_location(L) andalso is_stacktrace(Fs);
 is_stacktrace([{M,F,A}|Fs]) when is_atom(M), is_atom(F), is_integer(A) ->
     is_stacktrace(Fs);
 is_stacktrace([{M,F,As}|Fs]) when is_atom(M), is_atom(F), is_list(As) ->
@@ -93,13 +96,37 @@ is_stacktrace([{M,F,As}|Fs]) when is_atom(M), is_atom(F), is_list(As) ->
 is_stacktrace(_) ->
     false.
 
+is_location([]) ->
+    true;
+is_location([{A,_}|L]) when is_atom(A) ->
+    is_location(L);
+is_location(_) ->
+    false.
+
 format_stacktrace(Trace) ->
     format_stacktrace(Trace, "in function", "in call from").
 
-format_stacktrace([{M,F,A}|Fs], Pre, Pre1) when is_integer(A) ->
-    [io_lib:fwrite("  ~s ~w:~w/~w\n", [Pre, M, F, A])
+format_stacktrace([{M,F,AorAs,[]}|Fs], Pre, Pre1) ->
+    format_stacktrace([{M,F,AorAs}|Fs], Pre, Pre1);
+format_stacktrace([{M,F,AorAs,L}|Fs], Pre, Pre1) ->
+    [format_call(M, F, AorAs, Pre),
+     " at",
+     [io_lib:fwrite(Fmt, [Value])
+      || {Tag, Fmt} <- [{file, " ~s"}, {line, " line ~p"}],
+         begin
+             Value = proplists:get_value(Tag, L),
+             Value /= undefined
+         end]
      | format_stacktrace(Fs, Pre1, Pre1)];
-format_stacktrace([{M,F,As}|Fs], Pre, Pre1) when is_list(As) ->
+format_stacktrace([{M,F,AorAs}|Fs], Pre, Pre1) ->
+    [format_call(M, F, AorAs, Pre)
+     | format_stacktrace(Fs, Pre1, Pre1)];
+format_stacktrace([],_Pre,_Pre1) ->
+    "".
+
+format_call(M, F, A, Pre) when is_integer(A) ->
+    io_lib:fwrite("  ~s ~w:~w/~w\n", [Pre, M, F, A]);
+format_call(M, F, As, Pre) when is_list(As) ->
     A = length(As),
     C = case is_op(M,F,A) of
 	    true when A =:= 1 ->
@@ -112,11 +139,8 @@ format_stacktrace([{M,F,As}|Fs], Pre, Pre1) when is_list(As) ->
 	    false ->
 		io_lib:fwrite("~w(~s)", [F,format_arglist(As)])
 	end,
-    [io_lib:fwrite("  ~s ~w:~w/~w\n    called as ~s\n",
-		   [Pre,M,F,A,C])
-     | format_stacktrace(Fs,Pre1,Pre1)];
-format_stacktrace([],_Pre,_Pre1) ->
-    "".
+    io_lib:fwrite("  ~s ~w:~w/~w\n    called as ~s\n",
+                  [Pre,M,F,A,C]).
 
 format_arg(A) ->
     io_lib:format("~P",[A,15]).
