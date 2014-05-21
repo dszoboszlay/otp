@@ -19,6 +19,7 @@
 -module(crypto_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
+-include_lib("common_test/include/ct_event.hrl").
 
 %% Note: This directive should only be used in test suites.
 -compile(export_all).
@@ -146,7 +147,8 @@ groups() ->
      {no_blowfish_ofb64, [], [no_support, no_block]},
      {no_aes_ige256, [], [no_support, no_block]},
      {no_rc2_cbc, [], [no_support, no_block]},
-     {no_rc4, [], [no_support, no_stream]}
+     {no_rc4, [], [no_support, no_stream]},
+     {crypto_bench, [{repeat,50}], [all_speed]}
     ].
 
 %%-------------------------------------------------------------------
@@ -198,6 +200,11 @@ init_per_group(non_fips, Config) ->
         _NotEnabled ->
             NonFIPSConfig
     end;
+init_per_group(crypto_bench, Config) ->
+    lists:foldl(fun group_config/2,
+                init_per_group(non_fips, Config),
+                [Algo || {_Type, Algos} <- crypto:supports(),
+                         Algo <- Algos]);
 init_per_group(GroupName, Config) ->
     case atom_to_list(GroupName) of
         "no_" ++ TypeStr ->
@@ -385,10 +392,47 @@ rand_uniform(Config) when is_list(Config) ->
     rand_uniform_aux_test(10),
     10 = byte_size(crypto:rand_bytes(10)),
     10 = byte_size(crypto:strong_rand_bytes(10)).
+%%--------------------------------------------------------------------
+all_speed() ->
+    [{doc, "Benchmark the speed of all supported algorithms"}].
+all_speed(Config) when is_list(Config) ->
+    [case Item of
+         {hash, {Type, MsgsLE, _Digests}} ->
+             hash_speed(Type, lazy_eval(MsgsLE));
+         {hmac, {Type, Keys, DataLE, _Expected}} ->
+             hmac_speed(Type, lists:zip(Keys, lazy_eval(DataLE)));
+         {block, Blocks} ->
+             block_cipher_speed(Blocks);
+         {stream, Streams} ->
+             stream_cipher_speed(lazy_eval(Streams));
+         {sign_verify, Params} ->
+             sign_verify_speed(Params);
+         {pub_priv_encrypt, Params} ->
+             pub_priv_encrypt_speed(Params);
+         _ ->
+             ok
+     end
+     || Item <- Config],
+    ok.
 
 %%--------------------------------------------------------------------
 %% Internal functions ------------------------------------------------
 %%--------------------------------------------------------------------
+gen_speed(Title, Data, Fun) ->
+    StrTitle = unicode:characters_to_list([Title, " #"]),
+    gen_speed(StrTitle, 1, Data, Fun).
+
+gen_speed(Title, N, [DataN | Data], Fun) ->
+    {TimeN, _} = timer:tc(Fun, [DataN]),
+    TitleN = Title ++ integer_to_list(N),
+    ct_event:notify(#event{name = benchmark_data,
+                           data = [{value, TimeN},
+                                   {name,  TitleN}]}),
+    ct:log("~s: ~p", [TitleN, TimeN]),
+    gen_speed(Title, N + 1, Data, Fun);
+gen_speed(_Title, _N, [], _Fun) ->
+    ok.
+
 hash(_, [], []) ->
     ok;
 hash(Type, [Msg | RestMsg], [Digest| RestDigest]) ->
@@ -413,6 +457,16 @@ hash_increment(State, []) ->
 hash_increment(State0, [Increment | Rest]) ->
     State = crypto:hash_update(State0, Increment),
     hash_increment(State, Rest).
+
+hash_speed(Type, Msgs) ->
+    TypeName = atom_to_list(Type),
+    Inc = iolistify(lists:last(Msgs)),
+    gen_speed(TypeName ++ " hash",
+              Msgs,
+              fun (M) -> crypto:hash(Type, M) end),
+    gen_speed(TypeName ++ " iterative hash",
+              [Inc],
+              fun (M) -> hash_increment(crypto:hash_init(Type), M) end).
 
 hmac(_, [],[],[]) ->
     ok;
@@ -461,6 +515,17 @@ hmac_increment(State0, [Increment | Rest]) ->
     State = crypto:hmac_update(State0, Increment),
     hmac_increment(State, Rest).
 
+hmac_speed(Type, KeyDatas) ->
+    TypeName = atom_to_list(Type),
+    IncK = hmac_key(Type),
+    IncD = hmac_inc(Type),
+    gen_speed(TypeName ++ " hmac",
+              KeyDatas,
+              fun ({K,D}) -> crypto:hmac(Type, K, D) end),
+    gen_speed(TypeName ++ " iterative hmac",
+              [{IncK, IncD}],
+              fun ({K, D}) -> hmac_increment(crypto:hmac_init(Type, K), D) end).
+
 block_cipher({Type, Key,  PlainText}) ->
     Plain = iolist_to_binary(PlainText),
     CipherText = crypto:block_encrypt(Type, Key, PlainText),
@@ -504,6 +569,33 @@ block_cipher_increment(Type, Key, IV0, IV, [PlainText | PlainTexts], Plain, Acc)
     NextIV = crypto:next_iv(Type, CipherText),
     block_cipher_increment(Type, Key, IV0, NextIV, PlainTexts, Plain, [CipherText | Acc]).
 
+block_cipher_speed(Blocks) ->
+    Type = element(1, hd(Blocks)),
+    TypeName = atom_to_list(Type),
+    gen_speed(TypeName ++ " block encrypt",
+              Blocks,
+              fun ({_,K,D})   -> crypto:block_encrypt(Type, K, D);
+                  ({_,K,I,D}) -> crypto:block_encrypt(Type, K, I, D)
+              end),
+    if size(hd(Blocks)) =:= 4 andalso
+       (Type == des_cbc orelse
+        Type == des3_cbc orelse
+        Type == aes_cbc orelse
+        Type == des_cbf) ->
+            %% Run iterative block encrypt test
+            gen_speed(TypeName ++ " iterative block encrypt",
+                      block_iolistify(Blocks),
+                      fun Iterate({_,_,_,[]}) ->
+                              ok;
+                          Iterate({T,K,I,[D|Ds]}) ->
+                              Cipher = crypto:block_encrypt(Type, K, I, D),
+                              NextI  = crypto:next_iv(Type, Cipher),
+                              Iterate({T,K,NextI,Ds})
+                      end);
+       true ->
+            ok
+    end.
+
 stream_cipher({Type, Key, PlainText}) ->
     Plain = iolist_to_binary(PlainText),
     State = crypto:stream_init(Type, Key),
@@ -544,6 +636,34 @@ stream_cipher_incment(State0, OrigState, [PlainText | PlainTexts], Acc, Plain) -
     {State, CipherText} = crypto:stream_encrypt(State0, PlainText),
     stream_cipher_incment(State, OrigState, PlainTexts, [CipherText | Acc], Plain).
 
+stream_cipher_speed(Streams) ->
+    Type = element(1, hd(Streams)),
+    TypeName = atom_to_list(Type),
+    gen_speed(TypeName ++ " stream encrypt",
+              Streams,
+              fun ({_,K,D}) ->
+                      S = crypto:stream_init(Type, K),
+                      crypto:stream_encrypt(S, D);
+                  ({_,K,I,D}) ->
+                      S = crypto:stream_init(Type, K, I),
+                      crypto:stream_encrypt(S, D)
+              end),
+    gen_speed(TypeName ++ " iterative stream encrypt",
+              stream_iolistify(Streams),
+              fun ({_,K,D}) ->
+                      S = crypto:stream_init(Type, K),
+                      stream_cipher_speed_inc(S, D);
+                  ({_,K,I,D}) ->
+                      S = crypto:stream_init(Type, K, I),
+                      stream_cipher_speed_inc(S, D)
+              end).
+
+stream_cipher_speed_inc(_, []) ->
+    ok;
+stream_cipher_speed_inc(State, [Txt | Txts]) ->
+    {NewState, _} = crypto:stream_encrypt(State, Txt),
+    stream_cipher_speed_inc(NewState, Txts).
+
 do_sign_verify({Type, Hash, Public, Private, Msg}) ->
     Signature = crypto:sign(Type, Hash, Msg, Private),
     case crypto:verify(Type, Hash, Msg, Signature, Public) of
@@ -560,6 +680,17 @@ negative_verify(Type, Hash, Msg, Signature, Public) ->
         false ->
             ok
     end.
+
+sign_verify_speed(Params) ->
+    Type = element(1, hd(Params)),
+    TypeName = atom_to_list(Type),
+    gen_speed(TypeName ++ " sign",
+              [{Hash, Msg, Private} || {_, Hash, _, Private, Msg} <- Params],
+              fun ({H,M,K}) -> crypto:sign(Type, H, M, K) end),
+    gen_speed(TypeName ++ " verify",
+              [{Hash, Msg, crypto:sign(Type, Hash, Msg, Private), Public}
+               || {_, Hash, Public, Private, Msg} <- Params],
+              fun ({H,M,S,K}) -> crypto:verify(Type, H, M, S, K) end).
 
 do_public_encrypt({Type, Public, Private, Msg, Padding}) ->
     PublicEcn = (catch crypto:public_encrypt(Type, Msg, Public, Padding)),
@@ -580,6 +711,26 @@ do_private_encrypt({Type, Public, Private, Msg, Padding}) ->
         Other ->
             ct:fail({{crypto, public_decrypt, [Type, PrivEcn, Public, Padding]}, {expected, Msg}, {got, Other}})
     end.
+
+pub_priv_encrypt_speed(Params) ->
+    Type = element(1, hd(Params)),
+    TypeName = atom_to_list(Type),
+    gen_speed(TypeName ++ " public encrypt",
+              [{Msg, Pu, Padding} || {_, Pu, _, Msg, Padding} <- Params],
+              fun ({M,K,P}) -> crypto:public_encrypt(Type, M, K, P) end),
+    gen_speed(TypeName ++ " private encrypt",
+              [{Msg, Pr, Padding} || {_, _, Pr, Msg, Padding} <- Params,
+                                     Padding /= rsa_pkcs1_oaep_padding],
+              fun ({M,K,P}) -> crypto:private_encrypt(Type, M, K, P) end),
+    gen_speed(TypeName ++ " public decrypt",
+              [{crypto:private_encrypt(Type, Msg, Pr, Padding), Pu, Padding}
+               || {_, Pu, Pr, Msg, Padding} <- Params,
+                  Padding /= rsa_pkcs1_oaep_padding],
+              fun ({M,K,P}) -> crypto:public_decrypt(Type, M, K, P) end),
+    gen_speed(TypeName ++ " private decrypt",
+              [{crypto:public_encrypt(Type, Msg, Pu, Padding), Pr, Padding}
+               || {_, Pu, Pr, Msg, Padding} <- Params],
+              fun ({M,K,P}) -> crypto:private_decrypt(Type, M, K, P) end).
 
 do_generate_compute({srp = Type, UserPrivate, UserGenParams, UserComParams,
                      HostPublic, HostPrivate, HostGenParams, HostComParam, SessionKey}) ->
