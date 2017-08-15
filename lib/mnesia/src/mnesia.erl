@@ -2551,6 +2551,8 @@ system_info2(transaction_restarts) -> mnesia_lib:read_counter(trans_restarts);
 system_info2(transaction_log_writes) -> mnesia_dumper:get_log_writes();
 system_info2(core_dir) ->  mnesia_monitor:get_env(core_dir);
 system_info2(no_table_loaders) ->  mnesia_monitor:get_env(no_table_loaders);
+system_info2(no_dcd_workers) -> mnesia_monitor:get_env(no_dcd_workers);
+system_info2(no_dcl_workers) -> mnesia_monitor:get_env(no_dcl_workers);
 system_info2(dc_dump_limit) ->  mnesia_monitor:get_env(dc_dump_limit);
 system_info2(send_compressed) -> mnesia_monitor:get_env(send_compressed);
 

@@ -476,6 +476,101 @@ chunk_log(Log, Cont) ->
 	    Other
     end.
 
+bchunk_log(_Log, eof) ->
+    eof;
+bchunk_log(Log, Cont) ->
+    case disk_log:bchunk(Log, Cont) of
+	{error, Reason} ->
+	    fatal("Possibly truncated ~p file: ~p~n",
+		  [Log, Reason]);
+	{C2, Chunk, _BadBytes} ->
+	    %% Read_only case, should we warn about the bad log file?
+	    %% BUGBUG Should we crash if Repair == false ??
+	    %% We got to check this !!
+	    mnesia_lib:important("~p repaired, lost ~p bad bytes~n", [Log, _BadBytes]),
+	    {C2, Chunk};
+	Other ->
+	    Other
+    end.
+
+bchunk_traverse(Log, Fun, State) ->
+    bchunk_traverse(Log, start, Fun, State).
+
+bchunk_traverse(Log, Cont1, Fun, State1) ->
+    case bchunk_log(Log, Cont1) of
+        {Cont2, Bins} ->
+            State2 = Fun(Bins, State1),
+            bchunk_traverse(Log, Cont2, Fun, State2);
+        eof ->
+            close_log(Log),
+            Fun(eof, State1)
+    end.
+
+sync_bchunk_traverse_fun(eof, {_Fun, State}) ->
+    State;
+sync_bchunk_traverse_fun(Bins, {Fun, State1}) ->
+    State2 = Fun(Bins, State1),
+    {Fun, State2}.
+
+-record(async_workers, {spawn_fun, monitors, limit, log, last, state}).
+
+async_bchunk_traverse_fun(eof, Workers) ->
+    case queue:out(Workers#async_workers.monitors) of
+        {{value, Ref}, Monitors} ->
+            wait_async_worker(Ref, Workers, infinity),
+            async_bchunk_traverse_fun(eof,
+                                      Workers#async_workers{monitors = Monitors});
+        {empty, _} ->
+            Workers#async_workers.state
+    end;
+async_bchunk_traverse_fun(Bins, Workers)
+  when Workers#async_workers.limit =:= 0 ->
+    async_bchunk_traverse_fun(Bins, wait_async_workers(Workers));
+async_bchunk_traverse_fun(Bins, Workers) ->
+    #async_workers{spawn_fun = Fun,
+                   monitors = Monitors,
+                   limit = N,
+                   last = Worker1,
+                   state = State1} = Workers,
+    {Worker2, Ref, State2} = Fun(Bins, Worker1, State1),
+    Workers#async_workers{monitors = queue:in(Ref, Monitors),
+                          limit = N - 1,
+                          last = Worker2,
+                          state = State2}.
+
+wait_async_worker(Ref, Workers, Timeout) ->
+    receive
+        {'DOWN', Ref, process, _, normal} ->
+            ok;
+        {'DOWN', Ref, process, _, Reason} ->
+            fatal("Worker processing ~p file crashed: ~p~n",
+                  [Workers#async_workers.log, Reason])
+    after
+        Timeout -> timeout
+    end.
+
+wait_async_workers(Workers1 = #async_workers{limit = Limit}) ->
+    %% Wait for the oldest worker to terminate. It is not always
+    %% guaranteed that the oldest worker will finish first, but it is
+    %% very likely. And pattern matching on the monitor ref prevents
+    %% the accidental consumption of unrelated DOWN messages from the
+    %% message queue.
+    {MaybeRef, Monitors} = queue:out(Workers1#async_workers.monitors),
+    Workers2 = Workers1#async_workers{monitors = Monitors,
+                                      limit = Limit + 1},
+    case MaybeRef of
+        empty when Limit > 0 ->
+            Workers1;
+        {value, Ref} when Limit =:= 0 ->
+            wait_async_worker(Ref, Workers2, infinity),
+            wait_async_workers(Workers2);
+        {value, Ref} ->
+            case wait_async_worker(Ref, Workers2, 0) of
+                ok      -> wait_async_workers(Workers2);
+                timeout -> Workers1
+            end
+    end.
+
 %% Confirms the dump by closing prev log and delete the file
 confirm_log_dump(Updates) ->
     case mnesia_monitor:close_log(previous_log) of
@@ -942,9 +1037,8 @@ dcd2ets(Tab, Rep) ->
 	true ->
 	    Log = open_log({Tab, dcd2ets}, dcd_log_header(), Dcd,
 			   true, Rep, read_only),
-	    Data = chunk_log(Log, start),
-	    ok = insert_dcdchunk(Data, Log, Tab),
-	    close_log(Log),
+        {Fun, State} = dcd2ets_fun(max_dcd_workers(), Log, Tab),
+        bchunk_traverse(Log, Fun, State),
 	    load_dcl(Tab, Rep);
 	false -> %% Handle old dets files, and conversion from disc_only to disc.
 	    Fname = mnesia_lib:tab2dat(Tab),
@@ -958,17 +1052,39 @@ dcd2ets(Tab, Rep) ->
 	    end
     end.
 
-insert_dcdchunk({Cont, [LogH | Rest]}, Log, Tab)
+max_dcd_workers() ->
+    case ?catch_val(no_dcd_workers) of
+	{'EXIT', _} ->
+	    mnesia_lib:set(no_dcd_workers, 2),
+	    2;
+	Val -> Val
+    end.
+
+dcd2ets_fun(1, _Log, Tab) ->
+    {fun sync_bchunk_traverse_fun/2, {fun insert_dcdchunk/2, Tab}};
+dcd2ets_fun(N, Log, Tab) ->
+    {fun async_bchunk_traverse_fun/2,
+     #async_workers{spawn_fun = fun spawn_dcd_chunk_worker/3,
+                    monitors = queue:new(),
+                    limit = N,
+                    log = Log,
+                    state = Tab}}.
+
+spawn_dcd_chunk_worker(Bins, _PrevWorker, Tab) ->
+    {Pid, Ref} = spawn_monitor(fun () -> insert_dcdchunk(Bins, Tab) end),
+    {Pid, Ref, Tab}.
+
+insert_dcdchunk(Bins, Tab)
+  when is_binary(hd(Bins)) ->
+    insert_dcdchunk(lists:map(fun erlang:binary_to_term/1, Bins), Tab);
+insert_dcdchunk([LogH | Recs], Tab)
   when is_record(LogH, log_header),
        LogH#log_header.log_kind == dcd_log,
        LogH#log_header.log_version >= "1.0" ->
-    insert_dcdchunk({Cont, Rest}, Log, Tab);
-
-insert_dcdchunk({Cont, Recs}, Log, Tab) ->
+    insert_dcdchunk(Recs, Tab);
+insert_dcdchunk(Recs, Tab) ->
     true = ets:insert(Tab, Recs),
-    insert_dcdchunk(chunk_log(Log, Cont), Log, Tab);
-insert_dcdchunk(eof, _Log, _Tab) ->
-    ok.
+    Tab.
 
 load_dcl(Tab, Rep) ->
     FName = mnesia_lib:tab2dcl(Tab),
@@ -981,18 +1097,33 @@ load_dcl(Tab, Rep) ->
 		     true,
 		     Rep,
 		     read_only),
-	    FirstChunk = chunk_log(Name, start),
-            insert_logchunk(FirstChunk, Name),
-	    close_log(Name);
+            {Fun, State} = dcl2ets_fun(max_dcl_workers(), Name, Tab),
+            bchunk_traverse(Name, Fun, State);
 	false ->
 	    ok
     end.
 
-insert_logchunk({C2, Recs}, Tab) ->
-    lists:foreach(fun add_rec/1, Recs),
-    insert_logchunk(chunk_log(Tab, C2), Tab);
-insert_logchunk(eof, _Tab) ->
-    ok.
+max_dcl_workers() ->
+    case ?catch_val(no_dcl_workers) of
+	{'EXIT', _} ->
+	    mnesia_lib:set(no_dcl_workers, 2),
+	    2;
+	Val -> Val
+    end.
+
+dcl2ets_fun(1, _Log, _Tab) ->
+    {fun sync_bchunk_traverse_fun/2, {fun add_recs/2, ok}};
+dcl2ets_fun(N, Log, Tab) ->
+    EtsOpts = [ets:info(Tab, type), private, {keypos, ets:info(Tab, keypos)}],
+    {fun async_bchunk_traverse_fun/2,
+     #async_workers{spawn_fun = fun spawn_dcl_chunk_worker/3,
+                    monitors = queue:new(),
+                    limit = N,
+                    log = Log,
+                    state = {Tab, EtsOpts}}}.
+
+add_recs(Bins, _State) ->
+    lists:foreach(fun (Bin) -> add_rec(binary_to_term(Bin)) end, Bins).
 
 add_rec({{Tab, _Key}, Val, write}) ->
     true = ets:insert(Tab, Val);
@@ -1019,4 +1150,121 @@ add_rec(LogH)
        LogH#log_header.log_version >= "1.0" ->
     ok;
 add_rec({{Tab, _Key}, _Val, clear_table}) ->
+    true = ets:delete_all_objects(Tab).
+
+spawn_dcl_chunk_worker(Bins, Worker, State = {Tab, EtsOpts}) ->
+    {Pid, Ref} = spawn_monitor(fun () -> dcl_chunk_worker(Bins, Worker, Tab, EtsOpts) end),
+    {Pid, Ref, State}.
+
+dcl_chunk_worker(Bins, Worker, Tab, EtsOpts) ->
+    %% Build an internal buffer of the events in this chunk, then wait
+    %% for the previous worker to finish and insert the buffered
+    %% operations to the table.
+    Buffer = buffer_dcl_ops(Bins, EtsOpts),
+    wait_prev_worker(Worker),
+    lists:foreach(fun (Op) -> replay_dcl_buffered_op(Tab, Op) end, Buffer).
+
+wait_prev_worker(undefined) ->
+    ok;
+wait_prev_worker(Pid) ->
+    Ref = monitor(process, Pid),
+    receive {'DOWN', Ref, process, Pid, Reason} ->
+            case Reason of
+                normal -> ok;
+                noproc -> ok;
+                _ -> exit(Reason)
+            end
+    end.
+
+buffer_dcl_ops(Bins, EtsOpts) ->
+    RBuffer = lists:foldl(fun (Bin, Acc) ->
+                                  buffer_dcl_op(binary_to_term(Bin), Acc, EtsOpts)
+                          end,
+                          [],
+                          Bins),
+    case RBuffer of
+        [{write, T} | RRest] ->
+            %% Discard the ets table, keep the records only
+            Recs = ets:tab2list(T),
+            ets:delete(T),
+            lists:reverse(RRest, [{write, Recs}]);
+        _ ->
+            lists:reverse(RBuffer)
+    end.
+
+buffer_dcl_op({{Tab, _Key}, Val, write}, Acc, EtsOpts) ->
+    case Acc of
+        [{write, T} | _] ->
+            true = ets:insert(T, Val),
+            Acc;
+        _ ->
+            T = ets:new(Tab, EtsOpts),
+            true = ets:insert(T, Val),
+            [{write, T} | Acc]
+    end;
+buffer_dcl_op({{_Tab, Key}, _Val, delete}, Acc, _EtsOpts) ->
+    case Acc of
+        [{write, T} | Rest] ->
+            %% writing the contents of the buffer table T to Tab and
+            %% then deleting Val is the same as first deleting Val
+            %% from Tab and then writing the contents of T' to Tab,
+            %% where T' is the result of deleting Val from T.
+            true = ets:delete(T, Key),
+            [{write, T}, {delete, Key} | Rest];
+        _ ->
+            [{delete, Key} | Acc]
+    end;
+buffer_dcl_op({{_Tab, _Key}, Val, delete_object}, Acc, _EtsOpts) ->
+    case Acc of
+        [{write, T} | Rest] ->
+            %% same reasoning for the reordering of operations
+            true = ets:match_delete(T, Val),
+            [{write, T}, {match_delete, Val} | Rest];
+        _ ->
+            [{match_delete, Val} | Acc]
+    end;
+buffer_dcl_op({{_Tab, Key}, Val, update_counter}, Acc, _EtsOpts) ->
+    {RecName, Incr} = Val,
+    %% update_counter cannot be merged with other operations
+    Op = {update_counter, RecName, Key, Incr},
+    case Acc of
+        [{write, T} | Rest] ->
+            %% Discard the ets table, keep the records only
+            Recs = ets:tab2list(T),
+            ets:delete(T),
+            [Op, {write, Recs} | Rest];
+        _ ->
+            [Op | Acc]
+    end;
+buffer_dcl_op({{_Tab, _Key}, _Val, clear_table}, Acc, _EtsOpts) ->
+    case Acc of
+        [{write, T} | _] -> ets:delete(T);
+        _ -> ok
+    end,
+    [clear_table];
+buffer_dcl_op(LogH, Acc, _EtsOpts)
+  when is_record(LogH, log_header),
+       LogH#log_header.log_kind == dcl_log,
+       LogH#log_header.log_version >= "1.0" ->
+    Acc.
+
+replay_dcl_buffered_op(Tab, {write, Recs}) ->
+    true =  ets:insert(Tab, Recs);
+replay_dcl_buffered_op(Tab, {delete, Key}) ->
+    true = ets:delete(Tab, Key);
+replay_dcl_buffered_op(Tab, {match_delete, Val}) ->
+    true = ets:match_delete(Tab, Val);
+replay_dcl_buffered_op(Tab, {update_counter, RecName, Key, Incr}) ->
+    try
+        CounterVal = ets:update_counter(Tab, Key, Incr),
+        true = (CounterVal >= 0)
+    catch
+        error:_ when Incr < 0 ->
+	    Zero = {RecName, Key, 0},
+	    true = ets:insert(Tab, Zero);
+	error:_ ->
+	    Zero = {RecName, Key, Incr},
+	    true = ets:insert(Tab, Zero)
+    end;
+replay_dcl_buffered_op(Tab, clear_table) ->
     true = ets:delete_all_objects(Tab).

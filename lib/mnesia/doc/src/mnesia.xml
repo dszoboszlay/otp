@@ -3028,6 +3028,28 @@ raise(Name, Amount) ->
           contain few records. Default is <c>2</c>.</p>
       </item>
       <item>
+        <p><c>-mnesia no_dcd_workers NUMBER</c>. Specifies the maximum
+          number of parallel workers a table loader can use to process
+          the <c>.DCD</c> file of a <c>disc_copies</c> table. More
+          workers can help to amortise the cost of parsing the binary
+          data to terms, but eventually all workers will need to take a
+          lock on the underlying <c>ets</c> table. This puts a limit on
+          how much speed up is achievable by adding more workers. Default
+          is <c>2</c>.</p>
+      </item>
+      <item>
+        <p><c>-mnesia no_dcl_workers NUMBER</c>. Specifies the maximum
+          number of parallel workers a table loader can use to process
+          the <c>.DCL</c> file of a <c>disc_copies</c> table. More
+          workers can be useful if writes to tables are the most
+          frequent operation (and not deletes or counter updates). In
+          this case parallel workers can group together writes in a
+          pre-processing step to make actual updates to the underlying
+          <c>ets</c> table (which in case of <c>.DCL</c> files cannot be
+          reordered) faster. This can reduce the processing time at the
+          cost of increased CPU use. Default is <c>2</c>.</p>
+      </item>
+      <item>
         <p><c>-mnesia send_compressed Level</c>. Specifies the level of
           compression to be used when copying a table from the local
           node to another one. Default is <c>0</c>.</p>
