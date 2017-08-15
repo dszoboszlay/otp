@@ -71,7 +71,7 @@ do_get_disc_copy2(Tab, Reason, Storage, Type) when Storage == disc_copies ->
 	    ignore;
 	_ ->
 	    mnesia_monitor:mktab(Tab, Args),
-	    _Count = mnesia_log:dcd2ets(Tab, Repair),
+	    mnesia_log:dcd2ets(Tab, Repair),
 	    case mnesia_monitor:get_env(dump_disc_copies_at_startup)
 		andalso mnesia_dumper:needs_dump_ets(Tab) of
 		true ->

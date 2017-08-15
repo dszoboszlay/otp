@@ -952,8 +952,7 @@ dcd2ets(Tab, Rep) ->
 	    case mnesia_lib:dets_to_ets(Tab, Tab, Fname, Type, Rep, yes) of
 		loaded ->
 		    ets2dcd(Tab),
-		    file:delete(Fname),
-		    0;
+		    file:delete(Fname);
 		{error, Error} ->
 		    erlang:error({"Failed to load table from disc", [Tab, Error]})
 	    end
@@ -983,29 +982,25 @@ load_dcl(Tab, Rep) ->
 		     Rep,
 		     read_only),
 	    FirstChunk = chunk_log(Name, start),
-            N = insert_logchunk(FirstChunk, Name, 0),
-	    close_log(Name),
-	    N;
+            insert_logchunk(FirstChunk, Name),
+	    close_log(Name);
 	false ->
-	    0
+	    ok
     end.
 
-insert_logchunk({C2, Recs}, Tab, C) ->
-    N = add_recs(Recs, C),
-    insert_logchunk(chunk_log(Tab, C2), Tab, C+N);
-insert_logchunk(eof, _Tab, C) ->
-    C.
+insert_logchunk({C2, Recs}, Tab) ->
+    lists:foreach(fun add_rec/1, Recs),
+    insert_logchunk(chunk_log(Tab, C2), Tab);
+insert_logchunk(eof, _Tab) ->
+    ok.
 
-add_recs([{{Tab, _Key}, Val, write} | Rest], N) ->
-    true = ets:insert(Tab, Val),
-    add_recs(Rest, N+1);
-add_recs([{{Tab, Key}, _Val, delete} | Rest], N) ->
-    true = ets:delete(Tab, Key),
-    add_recs(Rest, N+1);
-add_recs([{{Tab, _Key}, Val, delete_object} | Rest], N) ->
-    true = ets:match_delete(Tab, Val),
-    add_recs(Rest, N+1);
-add_recs([{{Tab, Key}, Val, update_counter} | Rest], N) ->
+add_rec({{Tab, _Key}, Val, write}) ->
+    true = ets:insert(Tab, Val);
+add_rec({{Tab, Key}, _Val, delete}) ->
+    true = ets:delete(Tab, Key);
+add_rec({{Tab, _Key}, Val, delete_object}) ->
+    true = ets:match_delete(Tab, Val);
+add_rec({{Tab, Key}, Val, update_counter}) ->
     {RecName, Incr} = Val,
     try
 	CounterVal = ets:update_counter(Tab, Key, Incr),
@@ -1017,16 +1012,11 @@ add_recs([{{Tab, Key}, Val, update_counter} | Rest], N) ->
 	error:_ ->
 	    Zero = {RecName, Key, Incr},
 	    true = ets:insert(Tab, Zero)
-    end,
-    add_recs(Rest, N+1);
-add_recs([LogH|Rest], N)
+    end;
+add_rec(LogH)
   when is_record(LogH, log_header),
        LogH#log_header.log_kind == dcl_log,
        LogH#log_header.log_version >= "1.0" ->
-    add_recs(Rest, N);
-add_recs([{{Tab, _Key}, _Val, clear_table} | Rest], N) ->
-    Size = ets:info(Tab, size),
-    true = ets:delete_all_objects(Tab),
-    add_recs(Rest, N+Size);
-add_recs([], N) ->
-    N.
+    ok;
+add_rec({{Tab, _Key}, _Val, clear_table}) ->
+    true = ets:delete_all_objects(Tab).
