@@ -1928,7 +1928,7 @@ generator(Line, {Generate,Lg,P,E}, Gs, St0) when Generate =:= b_generate;
     %% long, in which case no more elements are generated.
     %%
     %% However, patterns can be variable length too, like
-    %% <<0:1, X:15, Y:X>>. In this case we geenerate a skip pattern that
+    %% <<0:1, X:15, Y:X>>. In this case we generate a skip pattern that
     %% still attempts to parse the field lengths:
     %% <<_:1, X:16, _:X, Tail/bitstring>>. If it matches, we can
     %% continue the generator on the tail, otherwise we can stop.
