@@ -1965,38 +1965,18 @@ generator(Line, {Generate,Lg,P,E}, Gs, St0) when Generate =:= b_generate;
             {AccSegs,Tail,TailSeg,St2} = append_tail_segment(Segs, St1),
             AccPat = Cp#ibinary{segments=AccSegs},
             {Cg,St3} = lc_guard_tests(Gs, St2),
-            {[BitStr,BitSize],St4} = new_vars(2, St3),
-            %% The non-empty bistring guard could be implemented either
-            %% as
-            %%
-            %% bit_size(BitStr) > 0
-            %%
-            %% or as
-            %%
-            %% is_bitstring(BitStr), BitStr =/= <<>>
-            %%
-            %% However, in the second case the compiler incorrectly
-            %% decides the is_bitstring/1 call had no effect and optimises
-            %% it away. So we stick to the first option instead.
-            BitSizeCall = #icall{anno=GAnno,
-                                 module=#c_literal{anno=GA,val=erlang},
-                                 name=#c_literal{anno=GA,val=bit_size},
-                                 args=[BitStr]},
-            CompCall = #icall{anno=GAnno,
-                              module=#c_literal{anno=GA,val=erlang},
-                              name=#c_literal{anno=GA,val='>'},
-                              args=[BitSize,#c_literal{anno=GA,val=0}]},
-            Guard = #iprotect{anno=GAnno,
-                              body=[#iset{anno=GAnno,var=BitSize,arg=BitSizeCall},
-                                    CompCall]},
-            {Ce,Pre,St5} = safe(E, St4),
+            Guard = #icall{anno=GAnno,
+                           module=#c_literal{anno=GA,val=erlang},
+                           name=#c_literal{anno=GA,val='=/='},
+                           args=[Tail,#c_literal{anno=GA,val= <<>>}]},
+            {Ce,Pre,St4} = safe(E, St3),
             Gen = #igen{anno=GAnno,acc_pat=AccPat,acc_guard=Cg,
-                        nomatch_pat=BitStr,
+                        nomatch_pat=#ibinary{anno=#a{anno=LA},segments=[TailSeg]},
                         nomatch_guard=[Guard],
-                        nomatch_mode=BitStr,
+                        nomatch_mode=Tail,
                         tail=Tail,tail_pat=#ibinary{anno=#a{anno=LA},segments=[TailSeg]},
                         arg={Pre,Ce}},
-            {Gen,St5}
+            {Gen,St4}
     catch
         throw:nomatch ->
             {Ce,Pre,St1} = safe(E, St0),
