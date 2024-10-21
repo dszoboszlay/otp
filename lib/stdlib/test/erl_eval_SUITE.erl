@@ -2060,6 +2060,7 @@ strict_generators(Config) when is_list(Config) ->
     check(fun() -> #{X+1 => Y*2 || X := Y <:- #{1 => 2, 3 => 4}} end,
           "#{X+1 => Y*2 || X := Y <:- #{1 => 2, 3 => 4}}.",
           #{2 => 4, 4 => 8}),
+
     %% A failing guard following a strict generator is ok
     check(fun() -> [X+1 || X <:- [1,2,3], X > 1] end,
           "[X+1 || X <:- [1,2,3], X > 1].",
@@ -2088,6 +2089,7 @@ strict_generators(Config) when is_list(Config) ->
     check(fun() -> #{X+1 => Y*2 || X := Y <:- #{1 => 2, 3 => 4}, X > 1} end,
           "#{X+1 => Y*2 || X := Y <:- #{1 => 2, 3 => 4}, X > 1}.",
           #{4 => 8}),
+
     %% Non-matching elements cause a badmatch error
     error_check("[X || {ok, X} <:- [{ok,1},2,{ok,3}]].",
                 {badmatch,2}),
@@ -2107,6 +2109,7 @@ strict_generators(Config) when is_list(Config) ->
                 {badmatch,<<128,2>>}),
     error_check("#{X => X+1 || X := ok <:- #{1 => ok, 2 => error, 3 => ok}}.",
                 {badmatch,{2,error}}),
+
     %% Binary generators don't allow unused bits at the end either
     error_check("[X || <<X:3>> <:= <<0>>].",
                 {badmatch,<<0:2>>}),

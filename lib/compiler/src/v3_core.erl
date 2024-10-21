@@ -1630,10 +1630,14 @@ lc_tq(Line, E, [#igen{anno=#a{anno=GA}=GAnno,
     TailClause = make_clause(LA, TailPat, [], [], [Mc]),
     {Lc,Lps,St3} = lc_tq(Line, E, Qs, Sc, St2),
     AccClause = make_clause(LA, AccPat, [], AccGuard, Lps ++ [Lc]),
-    AccClauseNoGuards = if AccGuard =:= [] -> nomatch;
-                           NomatchMode =:= skip -> nomatch;
-                           true -> make_clause([compiler_generated|LA],
-                                               AccPat, [], [], [Sc])
+    AccClauseNoGuards = if
+                            AccGuard =:= [] ->
+                                nomatch;
+                            NomatchMode =:= skip ->
+                                nomatch;
+                            true ->
+                                make_clause([compiler_generated|LA],
+                                            AccPat, [], [], [Sc])
                         end,
     RefillClause = make_clause(LA, RefillPat, [], [], [RefillAction,Sc]),
     Cs0 = [AccClause,AccClauseNoGuards,NomatchClause,TailClause,RefillClause],
@@ -1705,10 +1709,14 @@ bc_tq1(Line, E, [#igen{anno=#a{anno=GA}=GAnno,
     {Bc,Bps,St5} = bc_tq1(Line, E, Qs, AccVar, St4),
     Body = Bps ++ [#iset{var=AccVar,arg=Bc},Sc],
     AccClause = make_clause(LA, AccPat, [IgnoreVar], AccGuard, Body),
-    AccClauseNoGuards = if AccGuard =:= [] -> nomatch;
-                           NomatchMode =:= skip -> nomatch;
-                           true -> make_clause([compiler_generated|LA],
-                                               AccPat, [IgnoreVar], [], [Sc])
+    AccClauseNoGuards = if
+                            AccGuard =:= [] ->
+                                nomatch;
+                            NomatchMode =:= skip ->
+                                nomatch;
+                            true ->
+                                make_clause([compiler_generated|LA],
+                                            AccPat, [IgnoreVar], [], [Sc])
                         end,
     RefillClause = make_clause(LA, RefillPat, [AccVar], [], [RefillAction,Sc]),
     Cs0 = [AccClause,AccClauseNoGuards,NomatchClause,TailClause,RefillClause],

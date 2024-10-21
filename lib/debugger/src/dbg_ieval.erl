@@ -1211,14 +1211,14 @@ eval_generator({Generate,Line,P,Map0}, Bs0, CompFun, Ieval0) when Generate =:= m
 
 eval_generate([V|Rest], P, Bs0, CompFun, Relaxed, Ieval) ->
     case catch match1(P, V, erl_eval:new_bindings(), Bs0) of
-	{match,Bsn} ->
-	    Bs2 = add_bindings(Bsn, Bs0),
+        {match,Bsn} ->
+            Bs2 = add_bindings(Bsn, Bs0),
             CompFun(Bs2) ++ eval_generate(Rest, P, Bs0, CompFun, Relaxed, Ieval);
-	nomatch when Relaxed ->
-	    eval_generate(Rest, P, Bs0, CompFun, Relaxed, Ieval);
+        nomatch when Relaxed ->
+            eval_generate(Rest, P, Bs0, CompFun, Relaxed, Ieval);
         nomatch ->
             exception(error, {badmatch, V}, Bs0, Ieval)
-	end;
+        end;
 eval_generate([], _P, _Bs0, _CompFun, _Relaxed, _Ieval) ->
     [];
 eval_generate(Term, _P, Bs, _CompFun, _Relaxed, Ieval) ->
@@ -1228,14 +1228,14 @@ eval_b_generate(<<_/bitstring>>=Bin, P, Bs0, CompFun, Relaxed, Ieval) ->
     Mfun = match_fun(Bs0),
     Efun = fun(Exp, Bs) -> expr(Exp, Bs, #ieval{}) end,
     case eval_bits:bin_gen(P, Bin, erl_eval:new_bindings(), Bs0, Mfun, Efun) of
-	{match,Rest,Bs1} ->
-	    Bs2 = add_bindings(Bs1, Bs0),
-	    CompFun(Bs2) ++ eval_b_generate(Rest, P, Bs0, CompFun, Relaxed, Ieval);
+        {match,Rest,Bs1} ->
+            Bs2 = add_bindings(Bs1, Bs0),
+            CompFun(Bs2) ++ eval_b_generate(Rest, P, Bs0, CompFun, Relaxed, Ieval);
         {nomatch,Rest} when Relaxed ->
             eval_b_generate(Rest, P, Bs0, CompFun, Relaxed, Ieval);
         {nomatch,_Rest} ->
             exception(error, {badmatch, Bin}, Bs0, Ieval);
-	done when not Relaxed, Bin =/= <<>> ->
+        done when not Relaxed, Bin =/= <<>> ->
             exception(error, {badmatch, Bin}, Bs0, Ieval);
         done ->
             []
